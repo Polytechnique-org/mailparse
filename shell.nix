@@ -1,14 +1,13 @@
-with import ./common.nix;
-
+let
+  pkgs = import ./common.nix {};
+in
 pkgs.stdenv.mkDerivation {
-  name = "kannader";
+  name = "mailparse";
   buildInputs = (
     (with pkgs; [
-      rust-analyzer
-    ]) ++
-    (with rustNightlyChannel; [
       cargo
-      rust
+      rust-analyzer
+      rustc
     ])
   );
 }
