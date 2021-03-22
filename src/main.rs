@@ -4,7 +4,7 @@ use std::{
     path::PathBuf,
 };
 
-use anyhow::{ensure, Context};
+use anyhow::{bail, ensure, Context};
 use console::style;
 use rayon::prelude::*;
 use structopt::StructOpt;
@@ -287,6 +287,7 @@ struct Block {
     next_ids: HashSet<String>,
 }
 
+#[derive(Clone)]
 struct State {
     // see Block::creation_idx
     next_block_creation_idx: usize,
@@ -458,12 +459,28 @@ fn run(mut opt: Opt) -> anyhow::Result<()> {
         })
         .collect::<anyhow::Result<HashMap<PathBuf, State>>>()?;
 
+    if !display(&opt.message_id, states.clone()).context("displaying the result")? {
+        eprintln!(
+            "{}: found no mail with the requested message-id, trying with ‘<{}>’",
+            style("warning").bold().yellow(),
+            opt.message_id
+        );
+        let bracketed_mid = String::from("<") + &opt.message_id + ">";
+        if !display(&bracketed_mid, states).context("displaying the result")? {
+            bail!("found logs for neither ‘{0}’ nor ‘<{0}>’", opt.message_id);
+        }
+    }
+
+    Ok(())
+}
+
+fn display(message_id: &str, states: HashMap<PathBuf, State>) -> anyhow::Result<bool> {
     // Search the states for the blocks that are relevant to the message-id
     let blocks = states
         .iter()
         .flat_map(|(_, s)| {
             s.message_ids
-                .get(&opt.message_id)
+                .get(message_id)
                 .into_iter()
                 .flat_map(|ids| {
                     ids.iter()
@@ -474,50 +491,64 @@ fn run(mut opt: Opt) -> anyhow::Result<()> {
         })
         .collect::<Vec<Block>>();
 
+    if blocks.is_empty() {
+        return Ok(false);
+    }
+
     // Toposort the blocks
     // TODO: this currently causes more issues than it solves
     // problems, as the logs are usually ordered and this introduces
     // randomness
     /*
-       let successors = |id: &String| {
-           // get all the blocks pointed to by next-id
-           states
-               .iter()
-               .flat_map(move |s| {
-                   s.blocks
-                       .get(id)
-                       .into_iter()
-                       .flat_map(|b| b.next_ids.iter().cloned())
-               })
-               // and then, get all the blocks that point to this by previous-id
-               .chain(states.iter().flat_map(move |s| {
-                   s.blocks.iter().filter_map(move |(b_id, b)| {
-                       if b.previous_ids.contains(id) {
-                           Some(b_id.clone())
-                       } else {
-                           None
-                       }
-                   })
-               }))
-               .collect::<Vec<String>>()
-       };
-       let sorted_blocks = pathfinding::directed::topological_sort::topological_sort(
-           &blocks.iter().map(|b| b.id.clone()).collect::<Vec<String>>(),
-           successors,
-       )
-       .map_err(|id| {
-           anyhow!(
-               "Failed to toposort the blocks: a loop was found with id {}",
-               id
-           )
-       })?;
-       println!("{:?}", sorted_blocks);
+      let successors = |id: &String| {
+          // get all the blocks pointed to by next-id
+          states
+              .iter()
+              .flat_map(move |s| {
+                  s.blocks
+                      .get(id)
+                      .into_iter()
+                      .flat_map(|b| b.next_ids.iter().cloned())
+              })
+              // and then, get all the blocks that point to this by previous-id
+              .chain(states.iter().flat_map(move |s| {
+                  s.blocks.iter().filter_map(move |(b_id, b)| {
+                      if b.previous_ids.contains(id) {
+                          Some(b_id.clone())
+                      } else {
+                          None
+                      }
+                  })
+              }))
+              .collect::<Vec<String>>()
+      };
+      let sorted_blocks = pathfinding::directed::topological_sort::topological_sort(
+          &blocks.iter().map(|b| b.id.clone()).collect::<Vec<String>>(),
+          successors,
+      )
+      .map_err(|id| {
+          anyhow!(
+              "Failed to toposort the blocks: a loop was found with id {}",
+              id
+          )
+      })?;
+      println!("{:?}", sorted_blocks);
     */
 
     for b in blocks {
         let s = states
             .get(&b.file)
             .expect("retrieving state for a known-good filename");
+
+        println!();
+        if !b.previous_ids.is_empty() {
+            println!(
+                "{}",
+                style(format!("Coming from id(s) {:?}", b.previous_ids)).bold()
+            );
+        } else {
+            println!("{}", style(format!("Coming from an unknown place")).bold());
+        }
         println!(
             "{}",
             style(format!(
@@ -533,10 +564,18 @@ fn run(mut opt: Opt) -> anyhow::Result<()> {
         for l in b.lines {
             println!("    {}", s.lines[l]);
         }
-        println!();
+        println!("{}", style("--------------").bold());
+        if !b.next_ids.is_empty() {
+            println!(
+                "{}",
+                style(format!("Flowing into id(s) {:?}", b.next_ids)).bold()
+            );
+        } else {
+            println!("{}", style(format!("Flowing into unknown places")).bold());
+        }
     }
 
-    Ok(())
+    Ok(true)
 }
 
 fn main() {
