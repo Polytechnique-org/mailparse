@@ -9,7 +9,7 @@ let
   pkgs = import pkgsSrc {
     overlays = [
       (self: super: {
-        xorg-mailparse = import ./. {};
+        xorg-mailparse = self.callPackage ./package.nix {};
       })
     ];
   };
