@@ -8,6 +8,7 @@ pkgs.stdenv.mkDerivation {
       cargo
       rust-analyzer
       rustc
+      rustfmt
     ])
   );
 }

@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     io::BufRead,
     path::PathBuf,
 };
@@ -189,7 +189,7 @@ impl ParsedLine {
                                         tag("sender non-delivery notification: "),
                                         map(
                                             is_a("0123456789ABCDEF"),
-                                            |previous_id: &str| (None, Some(previous_id.to_string()), None),
+                                            |next_id: &str| (None, None, Some(next_id.to_string())),
                                         ),
                                         eof,
                                     ),
@@ -484,98 +484,227 @@ fn display(message_id: &str, states: HashMap<PathBuf, State>) -> anyhow::Result<
                 .into_iter()
                 .flat_map(|ids| {
                     ids.iter()
-                        .filter_map(|id| s.blocks.get(id).map(|blocks| blocks.clone()))
+                        .filter_map(|id| s.blocks.get(id).map(|b| (b.id.clone(), b.clone())))
                 })
-                .collect::<Vec<Block>>()
+                .collect::<Vec<(String, Block)>>()
                 .into_iter()
         })
-        .collect::<Vec<Block>>();
+        .collect::<HashMap<String, Block>>();
 
     if blocks.is_empty() {
         return Ok(false);
     }
 
-    // Toposort the blocks
-    // TODO: this currently causes more issues than it solves
-    // problems, as the logs are usually ordered and this introduces
-    // randomness
-    /*
-      let successors = |id: &String| {
-          // get all the blocks pointed to by next-id
-          states
-              .iter()
-              .flat_map(move |s| {
-                  s.blocks
-                      .get(id)
-                      .into_iter()
-                      .flat_map(|b| b.next_ids.iter().cloned())
-              })
-              // and then, get all the blocks that point to this by previous-id
-              .chain(states.iter().flat_map(move |s| {
-                  s.blocks.iter().filter_map(move |(b_id, b)| {
-                      if b.previous_ids.contains(id) {
-                          Some(b_id.clone())
-                      } else {
-                          None
-                      }
-                  })
-              }))
-              .collect::<Vec<String>>()
-      };
-      let sorted_blocks = pathfinding::directed::topological_sort::topological_sort(
-          &blocks.iter().map(|b| b.id.clone()).collect::<Vec<String>>(),
-          successors,
-      )
-      .map_err(|id| {
-          anyhow!(
-              "Failed to toposort the blocks: a loop was found with id {}",
-              id
-          )
-      })?;
-      println!("{:?}", sorted_blocks);
-    */
+    // Helper functions to toposort the blocks
+    //
+    // (we return BTreeSet's because it makes sure things are properly
+    // sorted and the display is reproducible)
+    let predecessors = |id: &str| {
+        // get all the blocks pointed to by previous-id
+        states
+            .iter()
+            .flat_map(move |(_, s)| {
+                s.blocks
+                    .get(id)
+                    .into_iter()
+                    .flat_map(|b| b.previous_ids.iter().cloned())
+            })
+            // and then, get all the blocks that point to this by next-id
+            .chain(states.iter().flat_map(move |(_, s)| {
+                s.blocks.iter().filter_map(move |(b_id, b)| {
+                    if b.next_ids.contains(id) {
+                        Some(b_id.clone())
+                    } else {
+                        None
+                    }
+                })
+            }))
+            .collect::<BTreeSet<String>>()
+    };
+    let successors = |id: &str| {
+        // get all the blocks pointed to by next-id
+        states
+            .iter()
+            .flat_map(move |(_, s)| {
+                s.blocks
+                    .get(id)
+                    .into_iter()
+                    .flat_map(|b| b.next_ids.iter().cloned())
+            })
+            // and then, get all the blocks that point to this by previous-id
+            .chain(states.iter().flat_map(move |(_, s)| {
+                s.blocks.iter().filter_map(move |(b_id, b)| {
+                    if b.previous_ids.contains(id) {
+                        Some(b_id.clone())
+                    } else {
+                        None
+                    }
+                })
+            }))
+            .collect::<BTreeSet<String>>()
+    };
 
-    for b in blocks {
-        let s = states
-            .get(&b.file)
-            .expect("retrieving state for a known-good filename");
-
-        println!();
-        if !b.previous_ids.is_empty() {
-            println!(
-                "{}",
-                style(format!("Coming from id(s) {:?}", b.previous_ids)).bold()
-            );
-        } else {
-            println!("{}", style(format!("Coming from an unknown place")).bold());
+    // Finally, display all the things
+    let mut displayed = HashSet::new();
+    for (id, _) in blocks.iter() {
+        if displayed.contains(&id as &str) {
+            // Already displayed this
+            continue;
         }
-        println!(
-            "{}",
-            style(format!(
-                "Queued with id {} in file {:?} around lines {}-{}\n\
-                 --------------",
-                b.id,
-                b.file,
-                b.lines.first().expect("block has zero lines"),
-                b.lines.last().expect("block has zero lines")
-            ))
-            .bold(),
+
+        // Figure out the root of the predecessors
+        let root = {
+            let initial_id = &id;
+            let mut id = id.clone();
+            let mut explored = HashSet::new();
+            loop {
+                explored.insert(id.clone());
+                let pred = predecessors(&id);
+                if pred.is_empty() {
+                    // Found the root
+                    break id;
+                }
+                if pred.len() > 1 {
+                    // More than one predecessor… ignoring, we'll pick the min-valued one
+                    eprintln!(
+                        "{}: {} has more than one predecessor, output may look weird",
+                        style("warning").bold().yellow(),
+                        id
+                    );
+                }
+                let parent = pred
+                    .iter()
+                    .next()
+                    .expect("getting the min element of a non-empty btree set")
+                    .clone();
+                ensure!(
+                    !explored.contains(&parent),
+                    "found a loop involving message {}",
+                    id,
+                );
+                ensure!(
+                    !displayed.contains(&parent),
+                    "somehow already displayed ancestor {} but not its child {}",
+                    parent,
+                    initial_id,
+                );
+                id = parent;
+            }
+        };
+
+        // Display the root and then all successors
+        display_recursively(
+            root,
+            2,
+            &predecessors,
+            &successors,
+            &|id| {
+                for (_, s) in states.iter() {
+                    if let Some(b) = s.blocks.get(id) {
+                        return Some(b.clone());
+                    }
+                }
+                None
+            },
+            &|path, line| states[path].lines[line].clone(),
+            &mut |id| displayed.insert(id.to_string()),
         );
-        for l in b.lines {
-            println!("    {}", s.lines[l]);
-        }
-        println!("{}", style("--------------").bold());
-        if !b.next_ids.is_empty() {
-            println!(
-                "{}",
-                style(format!("Flowing into id(s) {:?}", b.next_ids)).bold()
-            );
-        } else {
-            println!("{}", style(format!("Flowing into unknown places")).bold());
-        }
     }
 
     Ok(true)
+}
+
+fn display_recursively(
+    root: String,
+    indent: usize,
+    predecessors: &dyn Fn(&str) -> BTreeSet<String>,
+    successors: &dyn Fn(&str) -> BTreeSet<String>,
+    block: &dyn Fn(&str) -> Option<Block>,
+    line: &dyn Fn(&PathBuf, usize) -> String,
+    visit: &mut dyn FnMut(&str) -> bool, // returns true if it's the first visit
+) {
+    if !visit(&root) {
+        // already visited (probably while displaying this graph)
+        return;
+    }
+
+    let b = match block(&root) {
+        Some(b) => b,
+        None => {
+            eprintln!(
+                "{}: unable to find block ID {} in the provided files",
+                style("warning").bold().yellow(),
+                root,
+            );
+            return;
+        }
+    };
+
+    // display the root
+    let lines = b
+        .lines
+        .iter()
+        .map(|&l| line(&b.file, l))
+        .collect::<Vec<String>>();
+    let width = lines
+        .iter()
+        .map(|l| l.len())
+        .max()
+        .expect("block with no lines");
+
+    println!();
+    let bonus_header = {
+        let pred = predecessors(&root);
+        if !pred.is_empty() {
+            format!(", coming from {:?}", pred)
+        } else {
+            String::from("")
+        }
+    };
+    println!(
+        "{n:indent$}┌─{title:─<width$}─┐",
+        n = "",
+        title = format!("[ {}{} ]", style(&root).bold(), bonus_header,),
+        indent = indent,
+        width = width,
+    );
+    for l in lines {
+        println!(
+            "{n:indent$}│ {l: <width$} │",
+            n = "",
+            indent = indent,
+            l = l,
+            width = width,
+        );
+    }
+    let bonus_footer = {
+        let succ = successors(&root);
+        if !succ.is_empty() {
+            format!(", flowing into {:?}", succ)
+        } else {
+            String::from("")
+        }
+    };
+    println!(
+        "{n:indent$}└─{title:─<width$}─┘",
+        n = "",
+        title = format!("[ {}{} ]", style(&root).bold(), bonus_footer),
+        indent = indent,
+        width = width,
+    );
+
+    // and display all successors
+    for succ_id in successors(&root) {
+        display_recursively(
+            succ_id,
+            indent + 4,
+            predecessors,
+            successors,
+            block,
+            line,
+            visit,
+        );
+    }
 }
 
 fn main() {
