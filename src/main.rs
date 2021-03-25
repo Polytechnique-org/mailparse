@@ -592,6 +592,10 @@ fn run(mut opt: Opt) -> anyhow::Result<()> {
         .collect::<anyhow::Result<HashMap<PathBuf, State>>>()?;
 
     // Merge all the next-id and previous-id for later use
+    let bar = indicatif::ProgressBar::new(states.iter().map(|(_, s)| s.blocks.len() as u64).sum());
+    bar.set_style(bar_style);
+    bar.set_prefix("merging all data together");
+    let mut accumulated_pos = 0;
     let mut points_to: HashMap<String, HashSet<String>> = HashMap::new();
     let mut pointed_by: HashMap<String, HashSet<String>> = HashMap::new();
     for (_, s) in states.iter() {
@@ -616,6 +620,10 @@ fn run(mut opt: Opt) -> anyhow::Result<()> {
                     .or_insert_with(HashSet::new)
                     .insert(id.clone());
             }
+            accumulated_pos += 1;
+            if accumulated_pos % (bar.length() / 128) == 0 {
+                bar.set_position(accumulated_pos);
+            }
         }
     }
     for (_, s) in states.iter_mut() {
@@ -630,6 +638,7 @@ fn run(mut opt: Opt) -> anyhow::Result<()> {
                 .clone();
         }
     }
+    bar.finish();
 
     // Display the result
     if !display(&opt.message_id, states.clone()).context("displaying the result")? {
