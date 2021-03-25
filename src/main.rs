@@ -1,8 +1,7 @@
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     io::BufRead,
-    path::{Path, PathBuf},
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    path::PathBuf,
 };
 
 use anyhow::{bail, ensure, Context};
@@ -269,11 +268,17 @@ impl ParsedLine {
 // all the data associated to one postfix id
 #[derive(Clone, Debug)]
 struct Block {
+    // this block is the creation_idx'th one from the top of the file
+    creation_idx: usize,
+
     // the postfix id of this block
     id: String,
 
-    // all the lines in which this postfix-id appears (and which file they were in)
-    lines: HashMap<&'static Path, BTreeSet<usize>>,
+    // the file in which this block was
+    file: PathBuf,
+
+    // all the lines in which this postfix-id appears
+    lines: Vec<usize>,
 
     // all the previous id's
     previous_ids: HashSet<String>,
@@ -284,8 +289,14 @@ struct Block {
 
 #[derive(Clone)]
 struct State {
+    // see Block::creation_idx
+    next_block_creation_idx: usize,
+
+    // the file this refers to
+    file: PathBuf,
+
     // all the lines in the log files
-    lines: HashMap<&'static Path, HashMap<usize, String>>,
+    lines: Vec<String>,
 
     // message-id => all the postfix-id's where it appears
     message_ids: HashMap<String, Vec<String>>,
@@ -295,125 +306,67 @@ struct State {
 }
 
 impl State {
-    fn empty() -> State {
+    fn new(file: PathBuf) -> State {
         State {
-            lines: HashMap::new(),
+            next_block_creation_idx: 0,
+            file,
+            lines: Vec::new(),
             message_ids: HashMap::new(),
             blocks: HashMap::new(),
         }
     }
 
-    fn from_line(file: &'static Path, lineno: usize, line: String) -> Result<State, ()> {
+    fn eat(&mut self, line: String) -> Result<(), ()> {
+        let this_line = self.lines.len();
         let parsed = ParsedLine::parse(&line);
 
-        match parsed {
+        let is_useless = match parsed {
             ParsedLine::Postfix {
                 id,
                 message_id,
                 previous_id,
                 next_id,
             } => {
-                // Prepare the Block
-                let block = {
-                    let id = id.clone();
-
-                    let lines = {
-                        let mut file_lines = BTreeSet::new();
-                        file_lines.insert(lineno);
-
-                        let mut lines = HashMap::new();
-                        lines.insert(file, file_lines);
-                        lines
-                    };
-
-                    let mut previous_ids = HashSet::new();
-                    if let Some(pid) = previous_id {
-                        previous_ids.insert(pid);
-                    }
-
-                    let mut next_ids = HashSet::new();
-                    if let Some(nid) = next_id {
-                        next_ids.insert(nid);
-                    }
-
-                    Block {
-                        id,
-                        lines,
-                        previous_ids,
-                        next_ids,
-                    }
-                };
-
-                // Prepare the State
-                let lines = {
-                    let mut file_lines = HashMap::new();
-                    file_lines.insert(lineno, line);
-
-                    let mut lines = HashMap::new();
-                    lines.insert(file, file_lines);
-                    lines
-                };
-
-                let mut message_ids = HashMap::new();
                 if let Some(mid) = message_id {
-                    message_ids.insert(mid, vec![id.clone()]);
+                    self.message_ids
+                        .entry(mid)
+                        .or_insert_with(Vec::new)
+                        .push(id.clone());
                 }
-
-                let mut blocks = HashMap::new();
-                blocks.insert(id, block);
-
-                Ok(State {
-                    lines,
-                    message_ids,
-                    blocks,
-                })
+                let block = {
+                    let next_block_creation_idx = &mut self.next_block_creation_idx;
+                    let file = &self.file;
+                    self.blocks.entry(id.clone()).or_insert_with(|| {
+                        let creation_idx = *next_block_creation_idx;
+                        *next_block_creation_idx += 1;
+                        Block {
+                            creation_idx,
+                            id,
+                            file: file.clone(),
+                            lines: Vec::new(),
+                            previous_ids: HashSet::new(),
+                            next_ids: HashSet::new(),
+                        }
+                    })
+                };
+                block.lines.push(this_line);
+                if let Some(pid) = previous_id {
+                    block.previous_ids.insert(pid);
+                }
+                if let Some(nid) = next_id {
+                    block.next_ids.insert(nid);
+                }
+                false
             }
 
-            ParsedLine::Useless => Ok(State::empty()),
-            ParsedLine::Unknown => Err(()),
-        }
-    }
+            ParsedLine::Useless => true,
+            ParsedLine::Unknown => return Err(()),
+        };
 
-    fn merge(mut a: State, b: State) -> State {
-        for (path, lines) in b.lines {
-            let emplace = a.lines.entry(path).or_insert_with(HashMap::new);
-            for (lineno, line) in lines {
-                emplace.insert(lineno, line);
-            }
+        if !is_useless {
+            self.lines.push(line);
         }
-
-        for (mid, ids) in b.message_ids {
-            a.message_ids
-                .entry(mid)
-                .or_insert_with(Vec::new)
-                .extend(ids);
-        }
-
-        for (id, block) in b.blocks {
-            match a.blocks.entry(id) {
-                std::collections::hash_map::Entry::Vacant(v) => {
-                    v.insert(block);
-                }
-                std::collections::hash_map::Entry::Occupied(mut o) => {
-                    let emplace = o.get_mut();
-                    for (path, mut lines) in block.lines {
-                        emplace
-                            .lines
-                            .entry(path)
-                            .or_insert_with(BTreeSet::new)
-                            .append(&mut lines);
-                    }
-                    for id in block.previous_ids {
-                        emplace.previous_ids.insert(id);
-                    }
-                    for id in block.next_ids {
-                        emplace.next_ids.insert(id);
-                    }
-                }
-            }
-        }
-
-        a
+        Ok(())
     }
 }
 
@@ -469,60 +422,51 @@ fn run(mut opt: Opt) -> anyhow::Result<()> {
     });
 
     // Parse the files
-    let state = opt
+    let states = opt
         .files
         .iter()
-        .map(|f| &*Box::leak(f.clone().into_boxed_path()))
         .zip(bars.into_iter())
         .par_bridge()
-        .map(|(file, bar)| -> anyhow::Result<State> {
+        .map(|(file, bar)| {
             let f = std::fs::File::open(file)
                 .with_context(|| format!("opening log file {:?}", file))?;
             let f = std::io::BufReader::new(f);
 
-            let accumulated_size = AtomicU64::new(0);
-            let showed_message = AtomicBool::new(false);
-            let res = f
-                .lines()
-                .enumerate()
-                .par_bridge()
-                .map(|(lineno, line)| -> anyhow::Result<State> {
-                    let line = line.with_context(|| format!("reading file {:?}", file))?;
-                    let new_pos =
-                        accumulated_size.fetch_add(line.len() as u64 + 1, Ordering::Relaxed);
-                    if new_pos % (bar.length() / 2048) < 3 * line.len() as u64 {
-                        // this heuristics… appears to work in practice
-                        bar.set_position(new_pos);
-                    }
-                    match State::from_line(file, lineno, line.clone()) {
-                        Ok(s) => Ok(s),
-                        Err(()) => {
-                            if !showed_message.fetch_or(true, Ordering::Relaxed) {
-                                bar.set_message(&format!(
-                                    "{}: unable to parse line: {}",
-                                    style("warning").bold().yellow(),
-                                    line
-                                ));
-                            }
-                            Ok(State::empty())
-                        }
-                    }
-                })
-                .reduce(|| Ok(State::empty()), |a, b| Ok(State::merge(a?, b?)))?;
-            bar.finish();
-            Ok(res)
-        })
-        .reduce(|| Ok(State::empty()), |a, b| Ok(State::merge(a?, b?)))
-        .context("parsing the log files")?;
+            let mut accumulated_size = 0u64;
+            let mut state = State::new(file.clone());
+            let mut showed_message = false;
+            for l in f.lines() {
+                // Parse the line
+                let l = l.with_context(|| format!("reading file {:?}", file))?;
+                accumulated_size += (l.len() + 1) as u64;
+                if state.eat(l.clone()).is_err() && !showed_message {
+                    bar.set_message(&format!(
+                        "{}: unable to parse line: {}",
+                        style("warning").bold().yellow(),
+                        l,
+                    ));
+                    showed_message = true;
+                }
 
-    if !display(&opt.message_id, &state).context("displaying the result")? {
+                // And move the progress bar forward
+                if accumulated_size > bar.length() / 2048 {
+                    bar.inc(accumulated_size);
+                    accumulated_size = 0;
+                }
+            }
+            bar.finish();
+            Ok((file.clone(), state))
+        })
+        .collect::<anyhow::Result<HashMap<PathBuf, State>>>()?;
+
+    if !display(&opt.message_id, states.clone()).context("displaying the result")? {
         eprintln!(
             "{}: found no mail with the requested message-id, trying with ‘<{}>’",
             style("warning").bold().yellow(),
             opt.message_id
         );
         let bracketed_mid = String::from("<") + &opt.message_id + ">";
-        if !display(&bracketed_mid, &state).context("displaying the result")? {
+        if !display(&bracketed_mid, states).context("displaying the result")? {
             bail!("found logs for neither ‘{0}’ nor ‘<{0}>’", opt.message_id);
         }
     }
@@ -530,15 +474,20 @@ fn run(mut opt: Opt) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn display(message_id: &str, state: &State) -> anyhow::Result<bool> {
+fn display(message_id: &str, states: HashMap<PathBuf, State>) -> anyhow::Result<bool> {
     // Search the states for the blocks that are relevant to the message-id
-    let blocks = state
-        .message_ids
-        .get(message_id)
+    let blocks = states
         .iter()
-        .flat_map(|ids| {
-            ids.iter()
-                .filter_map(|id| state.blocks.get(id).map(|b| (b.id.clone(), b.clone())))
+        .flat_map(|(_, s)| {
+            s.message_ids
+                .get(message_id)
+                .into_iter()
+                .flat_map(|ids| {
+                    ids.iter()
+                        .filter_map(|id| s.blocks.get(id).map(|b| (b.id.clone(), b.clone())))
+                })
+                .collect::<Vec<(String, Block)>>()
+                .into_iter()
         })
         .collect::<HashMap<String, Block>>();
 
@@ -552,35 +501,45 @@ fn display(message_id: &str, state: &State) -> anyhow::Result<bool> {
     // sorted and the display is reproducible)
     let predecessors = |id: &str| {
         // get all the blocks pointed to by previous-id
-        state
-            .blocks
-            .get(id)
+        states
             .iter()
-            .flat_map(|b| b.previous_ids.iter().cloned())
+            .flat_map(move |(_, s)| {
+                s.blocks
+                    .get(id)
+                    .into_iter()
+                    .flat_map(|b| b.previous_ids.iter().cloned())
+            })
             // and then, get all the blocks that point to this by next-id
-            .chain(state.blocks.iter().filter_map(move |(b_id, b)| {
-                if b.next_ids.contains(id) {
-                    Some(b_id.clone())
-                } else {
-                    None
-                }
+            .chain(states.iter().flat_map(move |(_, s)| {
+                s.blocks.iter().filter_map(move |(b_id, b)| {
+                    if b.next_ids.contains(id) {
+                        Some(b_id.clone())
+                    } else {
+                        None
+                    }
+                })
             }))
             .collect::<BTreeSet<String>>()
     };
     let successors = |id: &str| {
         // get all the blocks pointed to by next-id
-        state
-            .blocks
-            .get(id)
+        states
             .iter()
-            .flat_map(|b| b.next_ids.iter().cloned())
+            .flat_map(move |(_, s)| {
+                s.blocks
+                    .get(id)
+                    .into_iter()
+                    .flat_map(|b| b.next_ids.iter().cloned())
+            })
             // and then, get all the blocks that point to this by previous-id
-            .chain(state.blocks.iter().filter_map(move |(b_id, b)| {
-                if b.previous_ids.contains(id) {
-                    Some(b_id.clone())
-                } else {
-                    None
-                }
+            .chain(states.iter().flat_map(move |(_, s)| {
+                s.blocks.iter().filter_map(move |(b_id, b)| {
+                    if b.previous_ids.contains(id) {
+                        Some(b_id.clone())
+                    } else {
+                        None
+                    }
+                })
             }))
             .collect::<BTreeSet<String>>()
     };
@@ -639,8 +598,15 @@ fn display(message_id: &str, state: &State) -> anyhow::Result<bool> {
             2,
             &predecessors,
             &successors,
-            &|id| state.blocks.get(id).cloned(),
-            &|path, line| state.lines[path][&line].clone(),
+            &|id| {
+                for (_, s) in states.iter() {
+                    if let Some(b) = s.blocks.get(id) {
+                        return Some(b.clone());
+                    }
+                }
+                None
+            },
+            &|path, line| states[path].lines[line].clone(),
             &mut |id| displayed.insert(id.to_string()),
         );
     }
@@ -654,7 +620,7 @@ fn display_recursively(
     predecessors: &dyn Fn(&str) -> BTreeSet<String>,
     successors: &dyn Fn(&str) -> BTreeSet<String>,
     block: &dyn Fn(&str) -> Option<Block>,
-    line: &dyn Fn(&'static Path, usize) -> String,
+    line: &dyn Fn(&PathBuf, usize) -> String,
     visit: &mut dyn FnMut(&str) -> bool, // returns true if it's the first visit
 ) {
     if !visit(&root) {
@@ -678,7 +644,7 @@ fn display_recursively(
     let lines = b
         .lines
         .iter()
-        .flat_map(|(&path, lines)| lines.iter().map(move |&l| line(path, l)))
+        .map(|&l| line(&b.file, l))
         .collect::<Vec<String>>();
     let width = lines
         .iter()
