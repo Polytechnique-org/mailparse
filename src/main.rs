@@ -17,7 +17,7 @@ struct Opt {
     /// Message-id to look for in the log files
     message_id: String,
 
-    /// Log files into which to look [default: /var/log/**/mail*.log]
+    /// Log files into which to look (gzipped or not) [default: /var/log/**/mail*.log]
     #[structopt(parse(from_os_str))]
     files: Vec<PathBuf>,
 }
@@ -453,9 +453,16 @@ fn run(mut opt: Opt) -> anyhow::Result<()> {
         .map(|(file, bar)| {
             let f = std::fs::File::open(file)
                 .with_context(|| format!("opening log file {:?}", file))?;
-            let mut f = std::io::BufReader::new(f);
+            let f = std::io::BufReader::new(bar.wrap_read(f));
+            let mut f = if file.extension().and_then(|e| e.to_str()) == Some("gz") {
+                Box::new(std::io::BufReader::new(
+                    libflate::gzip::Decoder::new(f)
+                        .with_context(|| format!("considering log file {:?} as gzipped", file))?,
+                )) as Box<dyn 'static + BufRead>
+            } else {
+                Box::new(f)
+            };
 
-            let mut accumulated_size = 0u64;
             let mut state = State::new(file.clone());
             let mut showed_message = false;
             let mut lineno = 0;
@@ -470,7 +477,6 @@ fn run(mut opt: Opt) -> anyhow::Result<()> {
                 if read == 0 {
                     break;
                 }
-                accumulated_size += read as u64;
 
                 // Parse the line
                 if state.eat(&l).is_err() && !showed_message {
@@ -481,12 +487,6 @@ fn run(mut opt: Opt) -> anyhow::Result<()> {
                         String::from_utf8_lossy(&l),
                     ));
                     showed_message = true;
-                }
-
-                // And move the progress bar forward
-                if accumulated_size > bar.length() / 2048 {
-                    bar.inc(accumulated_size);
-                    accumulated_size = 0;
                 }
             }
             bar.finish();

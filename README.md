@@ -15,7 +15,12 @@ Search for a message-ID across multiple log files:
 $ mailparse [message-id] /var/log/prod/mail/mail-*.log
 ```
 
-Search for a message-ID across all mail-related log files (warning: this is
+Search for a message-ID across a few days (also works with gzipped log files):
+```
+$ mailparse [message-id] /var/log/prod/mail/mail-2021-03-{24,25}*
+```
+
+Search for a message-ID across all uncompressed mail-related log files (warning: this is
 usually slow):
 ```
 $ mailparse [message-id]
@@ -23,8 +28,8 @@ $ mailparse [message-id]
 
 ## Deployment
 
-`mailparse` can simply be build with `cargo build --release` and then used from
-`target/release/mailparse`.
+`mailparse` can simply be build with `cargo build --release` and then
+used from `target/release/mailparse`.
 
 Unfortunately, current debian's rustc is too old for that, and it means that we
 have to build it another way.
