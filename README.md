@@ -34,4 +34,5 @@ that has `nix` installed, by running `./build-static.sh` from the root of the
 repository. This generates a `result/bin/mailparse` file, that can then be
 copied to the relevant server and used from there.
 
-Hopefully this will no longer be required after a few upgrade cycles.
+Hopefully this will no longer be required after a few upgrade cycles. For now, a
+compiled version of the program is available at /home/x2014gaspard/mailparse
