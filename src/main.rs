@@ -36,14 +36,14 @@ enum ParsedLine {
 }
 
 impl ParsedLine {
-    fn parse(line: &str) -> ParsedLine {
+    fn parse(line: &[u8]) -> ParsedLine {
         use nom::{
             branch::alt,
             bytes::complete::{is_a, tag, take, take_until},
             combinator::{eof, map, opt, rest, value},
             sequence::{delimited, preceded, tuple},
         };
-        let res: nom::IResult<&str, ParsedLine> = preceded(
+        let res: nom::IResult<&[u8], ParsedLine> = preceded(
             tuple((
                 take("Jan 10 00:00:00 ".len()), // skip the date
                 take_until(" "),                // skip the hostname
@@ -93,12 +93,12 @@ impl ParsedLine {
                             tuple((
                                 map(
                                     is_a("0123456789ABCDEF"),
-                                    |s: &str| s.to_string()
+                                    |s: &[u8]| String::from_utf8_lossy(s).to_string()
                                 ),
                                 tag(": "),
                                 alt((
                                     // Log lines with nothing
-                                    value((None, None, None), tuple((tag("removed"), eof))),
+                                    value((None, None, None), tuple((tag("removed\n"), eof))),
                                     value(
                                         (None, None, None),
                                         alt((
@@ -116,7 +116,7 @@ impl ParsedLine {
                                             is_a("0123456789"),
                                             tag(" from=<"),
                                             take_until(">"),
-                                            tag(">"),
+                                            tag(">\n"),
                                             eof,
                                         )),
                                     ),
@@ -129,7 +129,7 @@ impl ParsedLine {
                                             is_a("0123456789"),
                                             tag(", nrcpt="),
                                             is_a("0123456789"),
-                                            tag(" (queue active)"),
+                                            tag(" (queue active)\n"),
                                             eof,
                                         )),
                                     ),
@@ -148,7 +148,8 @@ impl ParsedLine {
                                         tuple((
                                             tag("client="),
                                             is_a("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.:-[]"),
-                                            eof
+                                            tag("\n"),
+                                            eof,
                                         )),
                                     ),
                                     value(
@@ -160,6 +161,7 @@ impl ParsedLine {
                                             take_until(","),
                                             tag(", sasl_username="),
                                             is_a("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-@"),
+                                            tag("\n"),
                                             eof,
                                         )),
                                     ),
@@ -175,23 +177,24 @@ impl ParsedLine {
                                         )),
                                     ),
                                     // Log lines with message-id's, previous id's and/or next id's
-                                    preceded(
+                                    delimited(
                                         tuple((
                                             opt(tag("resent-")), // consider resent-message-id like message-id
                                             tag("message-id="),
                                         )),
                                         map(
-                                            rest,
-                                            |message_id: &str| (Some(message_id.to_string()), None, None),
+                                            take_until("\n"),
+                                            |message_id: &[u8]| (Some(String::from_utf8_lossy(message_id).to_string()), None, None),
                                         ),
+                                        tuple((tag("\n"), eof)),
                                     ),
                                     delimited(
                                         tag("sender non-delivery notification: "),
                                         map(
                                             is_a("0123456789ABCDEF"),
-                                            |next_id: &str| (None, None, Some(next_id.to_string())),
+                                            |next_id: &[u8]| (None, None, Some(String::from_utf8_lossy(next_id).to_string())),
                                         ),
-                                        eof,
+                                        tuple((tag("\n"), eof)),
                                     ),
                                     delimited(
                                         tuple((
@@ -201,11 +204,12 @@ impl ParsedLine {
                                         )),
                                         map(
                                             is_a("0123456789ABCDEF"),
-                                            |previous_id: &str| (None, Some(previous_id.to_string()), None),
+                                            |previous_id: &[u8]| (None, Some(String::from_utf8_lossy(previous_id).to_string()), None),
                                         ),
                                         tuple((
                                             tag(", orig_client="),
                                             is_a("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-[]"),
+                                            tag("\n"),
                                             eof,
                                         )),
                                     ),
@@ -235,9 +239,9 @@ impl ParsedLine {
                                                 )),
                                                 map(
                                                     is_a("0123456789ABCDEF"),
-                                                    |next_id: &str| (None, None, Some(next_id.to_string()))
+                                                    |next_id: &[u8]| (None, None, Some(String::from_utf8_lossy(next_id).to_string()))
                                                 ),
-                                                tuple((tag(")"), eof)),
+                                                tuple((tag(")\n"), eof)),
                                             ),
                                             value((None, None, None), rest),
                                         )),
@@ -258,7 +262,21 @@ impl ParsedLine {
         match res {
             Ok((_, res)) => res,
             Err(_e) => {
-                // panic!("parse err in line {:?}:\n{:?}", line, _e);
+                /*
+                match _e {
+                    nom::Err::Incomplete(n) => panic!(
+                        "parse err in line:\n{:?}\nerror: incomplete (missing {:?})",
+                        String::from_utf8_lossy(line).to_string(),
+                        n,
+                    ),
+                    nom::Err::Error(e) | nom::Err::Failure(e) => panic!(
+                        "parse err in line:\n{:?}\nerror: {:?} at input:\n{:?}",
+                        String::from_utf8_lossy(line).to_string(),
+                        e.code,
+                        String::from_utf8_lossy(e.input).to_string(),
+                    ),
+                }
+                // */
                 ParsedLine::Unknown
             }
         }
@@ -316,9 +334,9 @@ impl State {
         }
     }
 
-    fn eat(&mut self, line: String) -> Result<(), ()> {
+    fn eat(&mut self, line: &[u8]) -> Result<(), ()> {
         let this_line = self.lines.len();
-        let parsed = ParsedLine::parse(&line);
+        let parsed = ParsedLine::parse(line);
 
         let is_useless = match parsed {
             ParsedLine::Postfix {
@@ -364,7 +382,7 @@ impl State {
         };
 
         if !is_useless {
-            self.lines.push(line);
+            self.lines.push(String::from_utf8_lossy(line).to_string());
         }
         Ok(())
     }
@@ -430,20 +448,29 @@ fn run(mut opt: Opt) -> anyhow::Result<()> {
         .map(|(file, bar)| {
             let f = std::fs::File::open(file)
                 .with_context(|| format!("opening log file {:?}", file))?;
-            let f = std::io::BufReader::new(f);
+            let mut f = std::io::BufReader::new(f);
 
             let mut accumulated_size = 0u64;
             let mut state = State::new(file.clone());
             let mut showed_message = false;
-            for l in f.lines() {
+            let mut l = Vec::new();
+            loop {
+                // Read the line
+                l.truncate(0);
+                let read = f
+                    .read_until(b'\n', &mut l)
+                    .with_context(|| format!("reading file {:?}", file))?;
+                if read == 0 {
+                    break;
+                }
+                accumulated_size += read as u64;
+
                 // Parse the line
-                let l = l.with_context(|| format!("reading file {:?}", file))?;
-                accumulated_size += (l.len() + 1) as u64;
-                if state.eat(l.clone()).is_err() && !showed_message {
+                if state.eat(&l).is_err() && !showed_message {
                     bar.set_message(&format!(
                         "{}: unable to parse line: {}",
                         style("warning").bold().yellow(),
-                        l,
+                        String::from_utf8_lossy(&l),
                     ));
                     showed_message = true;
                 }
