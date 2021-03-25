@@ -525,9 +525,7 @@ fn run(mut opt: Opt) -> anyhow::Result<()> {
             let size = std::fs::metadata(file)
                 .with_context(|| format!("retrieving metadata for log file {:?}", file))?
                 .len();
-            let bar = multi_progress.add(indicatif::ProgressBar::new(
-                ((size + 999_999) / 1_000_000) * 1_000_000,
-            ));
+            let bar = multi_progress.add(indicatif::ProgressBar::new(size));
             bar.set_style(bar_style.clone());
             bar.set_prefix(&format!(
                 "loading {name:width$?}",
