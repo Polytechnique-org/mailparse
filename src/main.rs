@@ -401,9 +401,6 @@ impl ParsedLine {
 // all the data associated to one postfix id
 #[derive(Clone, Debug)]
 struct Block {
-    // this block is the creation_idx'th one from the top of the file
-    creation_idx: usize,
-
     // the postfix id of this block
     id: String,
 
@@ -422,9 +419,6 @@ struct Block {
 
 #[derive(Clone)]
 struct State {
-    // see Block::creation_idx
-    next_block_creation_idx: usize,
-
     // the file this refers to
     file: PathBuf,
 
@@ -441,7 +435,6 @@ struct State {
 impl State {
     fn new(file: PathBuf) -> State {
         State {
-            next_block_creation_idx: 0,
             file,
             lines: Vec::new(),
             message_ids: HashMap::new(),
@@ -467,19 +460,13 @@ impl State {
                         .push(id.clone());
                 }
                 let block = {
-                    let next_block_creation_idx = &mut self.next_block_creation_idx;
                     let file = &self.file;
-                    self.blocks.entry(id.clone()).or_insert_with(|| {
-                        let creation_idx = *next_block_creation_idx;
-                        *next_block_creation_idx += 1;
-                        Block {
-                            creation_idx,
-                            id,
-                            file: file.clone(),
-                            lines: Vec::new(),
-                            previous_ids: HashSet::new(),
-                            next_ids: HashSet::new(),
-                        }
+                    self.blocks.entry(id.clone()).or_insert_with(|| Block {
+                        id,
+                        file: file.clone(),
+                        lines: Vec::new(),
+                        previous_ids: HashSet::new(),
+                        next_ids: HashSet::new(),
                     })
                 };
                 block.lines.push(this_line);
