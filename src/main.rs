@@ -68,7 +68,6 @@ impl ParsedLine {
                             ParsedLine::Useless,
                             alt((
                                 tag("Anonymous TLS connection established from "),
-                                tag("warning: "),
                                 tag("connect from "),
                                 tag("lost connection after "),
                                 tag("disconnect from "),
@@ -88,6 +87,118 @@ impl ParsedLine {
                                 tag("mapping DSN status "),
                                 tag("SSL_connect error to "),
                             )),
+                        ),
+                        // Warning log lines
+                        preceded(
+                            tag("warning: "),
+                            alt((
+                                // Warning log lines that begin with an identifier
+                                map(
+                                    tuple((
+                                        map(
+                                            is_a("0123456789ABCDEF"),
+                                            |s: &[u8]| String::from_utf8_lossy(s).to_string()
+                                        ),
+                                        tag(": "),
+                                        alt((
+                                            tag("message has been queued for "),
+                                            tag("unreasonable virtual_alias_maps map expansion size for "),
+                                            tag("multi-valued sender_canonical_maps entry for"),
+                                            tag("queue file size limit exceeded"),
+                                        )),
+                                    )),
+                                    |(id, _, _)| ParsedLine::Postfix {
+                                        id,
+                                        message_id: None,
+                                        previous_id: None,
+                                        next_id: None,
+                                    }
+                                ),
+                                // Warning log lines that contain no identifier
+                                value(
+                                    ParsedLine::Useless,
+                                    alt((
+                                        tag("SASL authentication failure: "),
+                                        tag("TLS library problem: "),
+                                        tag("valid_hostname: empty hostname"),
+                                        tag("valid_hostname: misplaced delimiter: ."),
+                                        tag("valid_hostname: invalid character "),
+                                        tag("malformed domain name in resource data of MX record for "),
+                                        tag("Illegal address syntax from "),
+                                        tag("numeric domain name in resource data of MX record for "),
+                                        tag("Connection concurrency limit exceeded: "),
+                                        tag("Message delivery request rate limit exceeded: "),
+                                        tag("non-SMTP command from "),
+                                        tag("no MX host for "),
+                                        tag("numeric hostname: "),
+                                    )),
+                                ),
+                                value(
+                                    ParsedLine::Useless,
+                                    tuple((
+                                        tag("database "),
+                                        take_until(" "),
+                                        tag(" is older than source file "),
+                                    )),
+                                ),
+                                value(
+                                    ParsedLine::Useless,
+                                    tuple((
+                                        tag("process "),
+                                        take_until(" "),
+                                        tag(" pid "),
+                                        is_a("0123456789"),
+                                        tag(" exit status "),
+                                    )),
+                                ),
+                                value(
+                                    ParsedLine::Useless,
+                                    tuple((
+                                        take_until(":"),
+                                        tag(": SASL "),
+                                        alt((tag("PLAIN"), tag("LOGIN"))),
+                                        tag(" authentication "),
+                                        alt((tag("failed"), tag("aborted"))),
+                                    )),
+                                ),
+                                value(
+                                    ParsedLine::Useless,
+                                    tuple((
+                                        take_until(":"),
+                                        tag(": bad command startup -- throttling\n"),
+                                        eof,
+                                    )),
+                                ),
+                                value(
+                                    ParsedLine::Useless,
+                                    tuple((
+                                        alt((tag("hostname "), tag("host "))),
+                                        take_until(" "),
+                                        alt((
+                                            tag(" does not resolve to address "),
+                                            tag(" greeted me with my own hostname "),
+                                            tag(" replied to HELO/EHLO with my own hostname "),
+                                        )),
+                                    )),
+                                ),
+                            )),
+                        ),
+                        // Log lines that contain an identifier
+                        map(
+                            delimited(
+                                tag("fatal: lock file bounce "),
+                                map(
+                                    is_a("0123456789ABCDEF"),
+                                    |s: &[u8]| String::from_utf8_lossy(s).to_string()
+                                ),
+                                tag(": Resource temporarily unavailable"),
+                            ),
+                            |id| ParsedLine::Postfix {
+                                id: id.to_string(),
+                                message_id: None,
+                                previous_id: None,
+                                next_id: None,
+                            },
                         ),
                         // Log lines that begin with an identifier
                         map(
@@ -110,6 +221,7 @@ impl ParsedLine {
                                             tag("filter: "),
                                             tag("Cannot start TLS: "),
                                             tag("conversation with "),
+                                            tag("warn: RCPT from "),
                                         )),
                                     ),
                                     value(
