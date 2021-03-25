@@ -32,7 +32,9 @@ have to build it another way.
 The recommended way is to build a musl-static version of mailparse on a machine
 that has `nix` installed, by running `./build-static.sh` from the root of the
 repository. This generates a `result/bin/mailparse` file, that can then be
-copied to the relevant server and used from there.
+copied to the relevant server and used from there. Be aware that the first time
+you run it `build-static.sh` will build a musl-ready `rustc`, so this will take
+some time and require some memory.
 
 Hopefully this will no longer be required after a few upgrade cycles. For now, a
 compiled version of the program is available at /home/x2014gaspard/mailparse
