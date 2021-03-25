@@ -86,6 +86,7 @@ impl ParsedLine {
                                 tag("Verified TLS connection established to "),
                                 tag("too many errors "),
                                 tag("mapping DSN status "),
+                                tag("SSL_connect error to "),
                             )),
                         ),
                         // Log lines that begin with an identifier
@@ -107,6 +108,8 @@ impl ParsedLine {
                                             tag("discard: "),
                                             tag("reject: "),
                                             tag("filter: "),
+                                            tag("Cannot start TLS: "),
+                                            tag("conversation with "),
                                         )),
                                     ),
                                     value(
@@ -382,7 +385,9 @@ impl State {
         };
 
         if !is_useless {
-            self.lines.push(String::from_utf8_lossy(line).to_string());
+            // Push the string apart from the trailing \n
+            self.lines
+                .push(String::from_utf8_lossy(&line[..line.len() - 1]).to_string());
         }
         Ok(())
     }
@@ -453,9 +458,11 @@ fn run(mut opt: Opt) -> anyhow::Result<()> {
             let mut accumulated_size = 0u64;
             let mut state = State::new(file.clone());
             let mut showed_message = false;
+            let mut lineno = 0;
             let mut l = Vec::new();
             loop {
                 // Read the line
+                lineno += 1;
                 l.truncate(0);
                 let read = f
                     .read_until(b'\n', &mut l)
@@ -468,8 +475,9 @@ fn run(mut opt: Opt) -> anyhow::Result<()> {
                 // Parse the line
                 if state.eat(&l).is_err() && !showed_message {
                     bar.set_message(&format!(
-                        "{}: unable to parse line: {}",
+                        "{}: unable to parse line {}: {}",
                         style("warning").bold().yellow(),
+                        lineno,
                         String::from_utf8_lossy(&l),
                     ));
                     showed_message = true;
