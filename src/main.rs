@@ -445,7 +445,7 @@ fn run(mut opt: Opt) -> anyhow::Result<()> {
     });
 
     // Parse the files
-    let states = opt
+    let mut states = opt
         .files
         .iter()
         .zip(bars.into_iter())
@@ -494,6 +494,47 @@ fn run(mut opt: Opt) -> anyhow::Result<()> {
         })
         .collect::<anyhow::Result<HashMap<PathBuf, State>>>()?;
 
+    // Merge all the next-id and previous-id for later use
+    let mut points_to: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut pointed_by: HashMap<String, HashSet<String>> = HashMap::new();
+    for (_, s) in states.iter() {
+        for (id, b) in s.blocks.iter() {
+            points_to
+                .entry(id.clone())
+                .or_insert_with(HashSet::new)
+                .extend(b.next_ids.iter().cloned());
+            for pid in b.previous_ids.iter() {
+                points_to
+                    .entry(pid.clone())
+                    .or_insert_with(HashSet::new)
+                    .insert(id.clone());
+            }
+            pointed_by
+                .entry(id.clone())
+                .or_insert_with(HashSet::new)
+                .extend(b.previous_ids.iter().cloned());
+            for nid in b.next_ids.iter() {
+                pointed_by
+                    .entry(nid.clone())
+                    .or_insert_with(HashSet::new)
+                    .insert(id.clone());
+            }
+        }
+    }
+    for (_, s) in states.iter_mut() {
+        for (id, b) in s.blocks.iter_mut() {
+            b.previous_ids = pointed_by
+                .get(id)
+                .expect("got block with no pointed-by list")
+                .clone();
+            b.next_ids = points_to
+                .get(id)
+                .expect("got block with no points-to list")
+                .clone();
+        }
+    }
+
+    // Display the result
     if !display(&opt.message_id, states.clone()).context("displaying the result")? {
         eprintln!(
             "{}: found no mail with the requested message-id, trying with ‘<{}>’",
@@ -535,7 +576,6 @@ fn display(message_id: &str, states: HashMap<PathBuf, State>) -> anyhow::Result<
     // (we return BTreeSet's because it makes sure things are properly
     // sorted and the display is reproducible)
     let predecessors = |id: &str| {
-        // get all the blocks pointed to by previous-id
         states
             .iter()
             .flat_map(move |(_, s)| {
@@ -544,20 +584,9 @@ fn display(message_id: &str, states: HashMap<PathBuf, State>) -> anyhow::Result<
                     .into_iter()
                     .flat_map(|b| b.previous_ids.iter().cloned())
             })
-            // and then, get all the blocks that point to this by next-id
-            .chain(states.iter().flat_map(move |(_, s)| {
-                s.blocks.iter().filter_map(move |(b_id, b)| {
-                    if b.next_ids.contains(id) {
-                        Some(b_id.clone())
-                    } else {
-                        None
-                    }
-                })
-            }))
             .collect::<BTreeSet<String>>()
     };
     let successors = |id: &str| {
-        // get all the blocks pointed to by next-id
         states
             .iter()
             .flat_map(move |(_, s)| {
@@ -566,16 +595,6 @@ fn display(message_id: &str, states: HashMap<PathBuf, State>) -> anyhow::Result<
                     .into_iter()
                     .flat_map(|b| b.next_ids.iter().cloned())
             })
-            // and then, get all the blocks that point to this by previous-id
-            .chain(states.iter().flat_map(move |(_, s)| {
-                s.blocks.iter().filter_map(move |(b_id, b)| {
-                    if b.previous_ids.contains(id) {
-                        Some(b_id.clone())
-                    } else {
-                        None
-                    }
-                })
-            }))
             .collect::<BTreeSet<String>>()
     };
 
